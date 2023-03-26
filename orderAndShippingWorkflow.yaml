@@ -1,0 +1,204 @@
+main:
+  params: [config]
+  steps:
+    - orderAndShippingBranches:
+        parallel:
+          branches:
+            - orderParallelBranch:
+                steps:
+                  - firstStep:
+                      call: OrderBranch
+                      args:
+                        project: ${config.project}
+                        maxRetry: ${config.maxRetry}
+                        orderParams: ${config.orderParams}
+            - shippingParallelBranch:
+                steps:
+                  - secondStep:
+                      call: ShippingBranch
+                      args:
+                        project: ${config.project}
+                        maxRetry: ${config.maxRetry}
+                        shippingParams: ${config.shippingParams}
+                  
+OrderBranch:
+  params: [project,maxRetry,orderParams]
+  steps:
+    - init:
+        assign:
+          - orderJobId: ""
+          - retryCount: 0
+    - orderPipeline:
+        call: LaunchOrderDataflow
+        args:
+          project: ${project}
+          orderParams: ${orderParams}
+        result: orderJobId
+    - checkPipelineStatus:
+        call: CheckOrderPipelineStatus
+        args:
+          project: ${project}
+          region: ${orderParams.region}
+          jobId: ${orderJobId}
+        result: currentStatus
+    - reassign:
+        assign:
+          - retryCount: ${retryCount + 1} 
+    - loop:
+        switch:
+          - condition: ${retryCount > maxRetry} 
+            raise: ${orderJobId+" in unexpected terminal status = "+currentStatus}
+        next: orderPipeline
+
+LaunchOrderDataflow:
+  params: [project,orderParams]
+  steps:
+    - launch:
+        call: googleapis.dataflow.v1b3.projects.locations.flexTemplates.launch
+        args:
+          projectId: ${project}
+          location: ${orderParams.region}
+          body:
+            launchParameter:
+              parameters:
+                inputTopicSubscription: ${orderParams.parameters.inputTopicSubscription}
+                bigQueryTable: ${orderParams.parameters.bigQueryTable}
+              environment:
+                tempLocation: ${orderParams.environment.tempLocation}
+                enableStreamingEngine: true
+                workerZone: ${orderParams.environment.workerZone}
+              containerSpecGcsPath: ${orderParams.flexTemplate}
+              jobName: ${"order-analytics-"+text.substring(time.format(sys.now()), 0, 10)}
+        result: launchResult
+        next: jobCreated
+    - jobCreated:
+        return: ${launchResult.job.id}
+
+CheckOrderPipelineStatus:
+  params: [project, region, jobId]
+  steps:
+    - init:
+        assign:
+          - currentStatus: ""
+          - failureStatuses: ["JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_UPDATED", "JOB_STATE_DRAINED"]
+    - check_condition:
+        switch:
+          - condition: ${currentStatus in failureStatuses}
+            next: exit_fail
+        next: iterate
+    - iterate:
+        steps:
+          - sleep30s:
+              call: sys.sleep
+              args:
+                seconds: 30
+          - getJob:
+              call: googleapis.dataflow.v1b3.projects.locations.jobs.get
+              args:
+                projectId: ${project}
+                location: ${region}
+                jobId: ${jobId}
+                view: "JOB_VIEW_SUMMARY"
+              result: getJobResponse
+          - getStatus:
+              assign:
+                - currentStatus: ${getJobResponse.currentState}
+          - log:
+              call: sys.log
+              args:
+                text: ${"Current job status for "+jobId+" = "+currentStatus}
+                severity: "INFO"
+        next: check_condition
+    - exit_fail:
+        return: ${currentStatus}
+
+ShippingBranch:
+  params: [project,maxRetry,shippingParams]
+  steps:
+    - init:
+        assign:
+          - shippingJobId: ""
+          - retryCount: 0
+    - shippingPipeline:
+        call: LaunchShippingDataflow
+        args:
+          project: ${project}
+          shippingParams: ${shippingParams}
+        result: shippingJobId
+    - checkPipelineStatus:
+        call: CheckShippingPipelineStatus
+        args:
+          project: ${project}
+          region: ${shippingParams.region}
+          jobId: ${shippingJobId}
+        result: currentStatus
+    - reassign:
+        assign:
+          - retryCount: ${retryCount + 1} 
+    - loop:
+        switch:
+          - condition: ${retryCount > maxRetry} 
+            raise: ${shippingJobId+" in unexpected terminal status = "+currentStatus}
+        next: shippingPipeline
+
+LaunchShippingDataflow:
+  params: [project, shippingParams]
+  steps:
+    - launch:
+        call: googleapis.dataflow.v1b3.projects.locations.flexTemplates.launch
+        args:
+          projectId: ${project}
+          location: ${shippingParams.region}
+          body:
+            launchParameter:
+              parameters:
+                inputTopicSubscription: ${shippingParams.parameters.inputTopicSubscription}
+                bigQueryTable: ${shippingParams.parameters.bigQueryTable}
+              environment:
+                tempLocation: ${shippingParams.environment.tempLocation}
+                enableStreamingEngine: true
+                workerZone: ${shippingParams.environment.workerZone}
+              containerSpecGcsPath: ${shippingParams.flexTemplate}
+              jobName: ${"shipping-analytics-"+text.substring(time.format(sys.now()), 0, 10)}
+        result: launchResult
+        next: jobCreated
+    - jobCreated:
+        return: ${launchResult.job.id}
+
+CheckShippingPipelineStatus:
+  params: [project, region, jobId]
+  steps:
+    - init:
+        assign:
+          - currentStatus: ""
+          - failureStatuses: ["JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_UPDATED", "JOB_STATE_DRAINED"]
+    - check_condition:
+        switch:
+          - condition: ${currentStatus in failureStatuses}
+            next: exit_fail
+        next: iterate
+    - iterate:
+        steps:
+          - sleep30s:
+              call: sys.sleep
+              args:
+                seconds: 30
+          - getJob:
+              call: googleapis.dataflow.v1b3.projects.locations.jobs.get
+              args:
+                projectId: ${project}
+                location: ${region}
+                jobId: ${jobId}
+                view: "JOB_VIEW_SUMMARY"
+              result: getJobResponse
+          - getStatus:
+              assign:
+                - currentStatus: ${getJobResponse.currentState}
+          - log:
+              call: sys.log
+              args:
+                text: ${"Current job status for "+jobId+" = "+currentStatus}
+                severity: "INFO"
+        next: check_condition
+    - exit_fail:
+        return: ${currentStatus}
